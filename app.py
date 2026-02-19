@@ -149,7 +149,7 @@ if audio_value is not None:
             prob_male = 1.0 - prob_female
             st.success(f"👦 **Male Voice** (Confidence: {prob_male * 100:.1f}%)")
             
-        st.progress(prob_female, text="0% = Male | 100% = Female")
+        # st.progress(prob_female, text="0% = Male | 100% = Female")
         
     except Exception as e:
         st.error(f"An error occurred while processing the audio: {e}")

@@ -3,11 +3,12 @@ import torch
 import torchaudio
 import torch.nn as nn
 import io
+import soundfile as sf
+import numpy as np
 
-# ==========================================
+
 # 1. DEFINE THE MODEL ARCHITECTURE
-# ==========================================
-# (This MUST match your training code exactly)
+
 class AudioCNN(nn.Module):
     def __init__(self):
         super(AudioCNN, self).__init__()
@@ -40,32 +41,46 @@ class AudioCNN(nn.Module):
         x = self.dropout(x)
         return self.sigmoid(self.fc(x))
 
-# ==========================================
+
 # 2. LOAD THE TRAINED MODEL
-# ==========================================
+
 @st.cache_resource
 def load_model():
     model = AudioCNN()
-    # Load weights. We use map_location='cpu' so it runs safely on any web server/machine
+    # Load weights safely on any web server/machine
     model.load_state_dict(torch.load("best_audio_gender_model.pth", map_location=torch.device('cpu'), weights_only=True))
-    
-    # CRITICAL: Set to evaluation mode! 
-    # This turns OFF Dropout and locks Batch Normalization. 
-    # If you forget this, your predictions will be random.
+    # CRITICAL: Set to evaluation mode!
     model.eval() 
     return model
 
 model = load_model()
 
-# ==========================================
+
 # 3. AUDIO PREPROCESSING PIPELINE
-# ==========================================
+
 def process_audio(audio_bytes):
-    # 1. Load audio from memory buffer
-    waveform, sr = torchaudio.load(io.BytesIO(audio_bytes))
-    
+    # These targets apply regardless of which OS you use
     target_sr = 16000
     target_samples = target_sr * 4 # 4 seconds
+    
+
+    # --- macOS / Linux AUDIO LOADING ---
+    # (Uncomment the lines below if using a Mac/Linux, 
+    # and comment out the Windows section)
+
+    # waveform, sr = torchaudio.load(io.BytesIO(audio_bytes))
+    
+
+    # --- Windows AUDIO LOADING ---
+    # (Uses soundfile to bypass the missing FFmpeg error)
+    data, sr = sf.read(io.BytesIO(audio_bytes))
+    
+    # Convert soundfile's numpy array back to a PyTorch tensor shape (channels, samples)
+    if data.ndim == 1:
+        waveform = torch.tensor(data, dtype=torch.float32).unsqueeze(0) # Mono
+    else:
+        waveform = torch.tensor(data, dtype=torch.float32).transpose(0, 1) # Stereo
+    # ---------------------------------------------------------
     
     # 2. Convert to Mono
     if waveform.shape[0] > 1:
@@ -76,14 +91,15 @@ def process_audio(audio_bytes):
         resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
         waveform = resampler(waveform)
         
-    # 4. Pad or Truncate
+    # 4. Pad or Truncate (Using the LOOP technique to fix the Google TTS bug)
     if waveform.shape[1] > target_samples:
         waveform = waveform[:, :target_samples]
     elif waveform.shape[1] < target_samples:
-        padding = target_samples - waveform.shape[1]
-        waveform = torch.nn.functional.pad(waveform, (0, padding))
+        # Loop the audio to fill the 4 seconds instead of padding with dead silence
+        repeats = (target_samples // waveform.shape[1]) + 1
+        waveform = waveform.repeat(1, repeats)[:, :target_samples]
         
-    # 5. Extract Mel Spectrogram (Exact same params as training)
+    # 5. Extract Mel Spectrogram
     mel_spectrogram = torchaudio.transforms.MelSpectrogram(
         sample_rate=target_sr, n_fft=2048, hop_length=512, n_mels=128
     )
@@ -95,7 +111,7 @@ def process_audio(audio_bytes):
     # 6. Normalize
     mel_spec_db = (mel_spec_db - mel_spec_db.mean()) / (mel_spec_db.std() + 1e-6)
     
-    # Add a "Batch" dimension so the shape becomes [1, 1, 128, time_steps]
+    # Add a "Batch" dimension [1, 1, 128, time_steps]
     return mel_spec_db.unsqueeze(0) 
 
 # ==========================================
@@ -120,21 +136,19 @@ if audio_value is not None:
         input_tensor = process_audio(audio_bytes)
         
         # Make the prediction
-        with torch.no_grad(): # Don't track gradients during inference
+        with torch.no_grad():
             prediction = model(input_tensor)
-            prob_female = prediction.item() # Get the float value from the tensor
+            prob_female = prediction.item() 
             
         # Display the results
         st.subheader("Prediction:")
         
-        # Remember: 0 = Male, 1 = Female from our training split
         if prob_female > 0.5:
             st.success(f"👧 **Female Voice** (Confidence: {prob_female * 100:.1f}%)")
         else:
             prob_male = 1.0 - prob_female
             st.success(f"👦 **Male Voice** (Confidence: {prob_male * 100:.1f}%)")
             
-        # Add a progress bar to visually show the scale
         st.progress(prob_female, text="0% = Male | 100% = Female")
         
     except Exception as e:
